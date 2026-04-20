@@ -23,10 +23,11 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { randomBytes } from 'crypto';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { convertGifToMp4 } from './media_convert.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -439,7 +440,8 @@ const MIME_MAP = {
 };
 
 function inferMediaType(ext) {
-  if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) return 'image';
+  if (ext === 'gif') return 'gif';
+  if (['jpg', 'jpeg', 'png', 'webp'].includes(ext)) return 'image';
   if (['mp4', 'mov', 'avi', 'mkv', '3gp'].includes(ext)) return 'video';
   if (['ogg', 'opus', 'mp3', 'wav', 'm4a'].includes(ext)) return 'audio';
   return 'document';
@@ -461,27 +463,46 @@ app.post('/send-media', async (req, res) => {
       return res.status(404).json({ error: `File not found: ${filePath}` });
     }
 
-    const buffer = readFileSync(filePath);
     const ext = filePath.toLowerCase().split('.').pop();
     const type = mediaType || inferMediaType(ext);
     let msgPayload;
+    let tempMp4Path = null;  // cleaned up in finally
 
     switch (type) {
+      case 'gif': {
+        // WhatsApp animates GIFs only when sent as a video with gifPlayback: true.
+        // Baileys needs an MP4 buffer — convert with ffmpeg. If conversion fails,
+        // fall back to sending as a static image.
+        try {
+          tempMp4Path = await convertGifToMp4(filePath);
+          const mp4Buffer = readFileSync(tempMp4Path);
+          msgPayload = {
+            video: mp4Buffer,
+            caption: caption || undefined,
+            mimetype: 'video/mp4',
+            gifPlayback: true,
+          };
+        } catch (ffErr) {
+          console.log(JSON.stringify({ event: 'gif_fallback_to_image', error: ffErr.message }));
+          msgPayload = { image: readFileSync(filePath), caption: caption || undefined, mimetype: 'image/gif' };
+        }
+        break;
+      }
       case 'image':
-        msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+        msgPayload = { image: readFileSync(filePath), caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
         break;
       case 'video':
-        msgPayload = { video: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
+        msgPayload = { video: readFileSync(filePath), caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
         break;
       case 'audio': {
         const audioMime = (ext === 'ogg' || ext === 'opus') ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
-        msgPayload = { audio: buffer, mimetype: audioMime, ptt: ext === 'ogg' || ext === 'opus' };
+        msgPayload = { audio: readFileSync(filePath), mimetype: audioMime, ptt: ext === 'ogg' || ext === 'opus' };
         break;
       }
       case 'document':
       default:
         msgPayload = {
-          document: buffer,
+          document: readFileSync(filePath),
           fileName: fileName || path.basename(filePath),
           caption: caption || undefined,
           mimetype: MIME_MAP[ext] || 'application/octet-stream',
@@ -490,6 +511,9 @@ app.post('/send-media', async (req, res) => {
     }
 
     const sent = await sock.sendMessage(chatId, msgPayload);
+    if (tempMp4Path) {
+      try { unlinkSync(tempMp4Path); } catch {}
+    }
 
     // Track sent message ID to prevent echo-back loops
     if (sent?.key?.id) {
