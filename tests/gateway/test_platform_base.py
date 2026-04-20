@@ -249,6 +249,57 @@ class TestExtractImages:
         # The PDF link must survive in cleaned content
         assert "![report](https://example.com/report.pdf)" in cleaned
 
+    # --- Bare URL extraction (model outputs plain URLs without markdown) ---
+
+    def test_bare_gif_url(self):
+        content = "Here it is: https://i.makeagif.com/media/7-10-2022/0Kwv0K.gif"
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0] == "https://i.makeagif.com/media/7-10-2022/0Kwv0K.gif"
+        assert "0Kwv0K.gif" not in cleaned
+
+    def test_bare_png_url_with_trailing_punct(self):
+        content = "Check https://example.com/cat.png, isn't it cute?"
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0] == "https://example.com/cat.png"
+        assert "cat.png" not in cleaned
+        assert "isn't it cute?" in cleaned
+
+    def test_bare_jpg_at_end_of_line(self):
+        content = "Photo: https://example.com/photo.jpg"
+        images, _ = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0] == "https://example.com/photo.jpg"
+
+    def test_bare_url_with_query_string(self):
+        content = "Link: https://example.com/image.gif?v=42"
+        images, _ = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0] == "https://example.com/image.gif?v=42"
+
+    def test_bare_url_not_double_extracted_with_markdown(self):
+        """A URL wrapped in markdown should only be extracted once, via markdown."""
+        content = "![cat](https://example.com/cat.png)"
+        images, _ = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0] == "https://example.com/cat.png"
+        assert images[0][1] == "cat"  # alt text preserved
+
+    def test_bare_non_image_url_ignored(self):
+        """Plain URLs without image extensions should not be extracted."""
+        content = "See https://example.com/page.html for details."
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert images == []
+        assert "https://example.com/page.html" in cleaned
+
+    def test_animation_detection_on_bare_gif(self):
+        """Bare .gif URLs must be routed through send_animation (not send_image)."""
+        content = "https://i.makeagif.com/media/7-10-2022/0Kwv0K.gif"
+        images, _ = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert BasePlatformAdapter._is_animation_url(images[0][0]) is True
+
 
 # ---------------------------------------------------------------------------
 # extract_media

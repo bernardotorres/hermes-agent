@@ -1155,22 +1155,23 @@ class BasePlatformAdapter(ABC):
     @staticmethod
     def extract_images(content: str) -> Tuple[List[Tuple[str, str]], str]:
         """
-        Extract image URLs from markdown and HTML image tags in a response.
-        
+        Extract image URLs from markdown, HTML image tags, and bare URLs.
+
         Finds patterns like:
         - ![alt text](https://example.com/image.png)
         - <img src="https://example.com/image.png">
         - <img src="https://example.com/image.png"></img>
-        
+        - https://example.com/image.gif  (bare URL ending in image extension)
+
         Args:
             content: The response text to scan.
-        
+
         Returns:
             Tuple of (list of (url, alt_text) pairs, cleaned content with image tags removed).
         """
         images = []
         cleaned = content
-        
+
         # Match markdown images: ![alt](url)
         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
         for match in re.finditer(md_pattern, content):
@@ -1180,24 +1181,45 @@ class BasePlatformAdapter(ABC):
             if any(url.lower().endswith(ext) or ext in url.lower() for ext in
                    ['.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn', 'replicate.delivery']):
                 images.append((url, alt_text))
-        
+
         # Match HTML img tags: <img src="url"> or <img src="url"></img> or <img src="url"/>
         html_pattern = r'<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?'
         for match in re.finditer(html_pattern, content):
             url = match.group(1)
             images.append((url, ""))
-        
+
+        # Match bare URLs ending in image extensions: https://example.com/foo.gif
+        # The negative lookbehinds avoid double-matching URLs already inside markdown
+        # ![alt](url) or HTML <img src="url">. A conservative trailing lookahead keeps
+        # trailing punctuation (., ,, ), ]) out of the captured URL.
+        bare_pattern = (
+            r'(?<![\(\[\"\'=])'
+            r'(https?://[^\s<>"\'\)\]]+?\.(?:png|jpe?g|gif|webp))'
+            r'(?:\?[^\s<>"\'\)\]]*)?'
+            r'(?=[\s.,;:!?\)\]}]|$)'
+        )
+        already_extracted = {url for url, _ in images}
+        for match in re.finditer(bare_pattern, content, re.IGNORECASE):
+            url = match.group(0)
+            if url not in already_extracted:
+                images.append((url, ""))
+                already_extracted.add(url)
+
         # Remove only the matched image tags from content (not all markdown images)
         if images:
             extracted_urls = {url for url, _ in images}
             def _remove_if_extracted(match):
-                url = match.group(2) if match.lastindex >= 2 else match.group(1)
+                url = match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
                 return '' if url in extracted_urls else match.group(0)
             cleaned = re.sub(md_pattern, _remove_if_extracted, cleaned)
             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
+            # Remove bare URLs that were extracted (leave other URLs alone)
+            def _remove_bare(match):
+                return '' if match.group(0) in extracted_urls else match.group(0)
+            cleaned = re.sub(bare_pattern, _remove_bare, cleaned, flags=re.IGNORECASE)
             # Clean up leftover blank lines
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        
+
         return images, cleaned
     
     async def send_voice(
